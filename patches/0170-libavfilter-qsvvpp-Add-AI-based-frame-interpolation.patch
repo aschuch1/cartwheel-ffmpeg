@@ -1,0 +1,84 @@
+From d07a48ee7b1e7ebed40323d0b0a613af4f800d0f Mon Sep 17 00:00:00 2001
+From: Ana Schuch <ana.schuch@intel.com>
+Date: Thu, 10 Jul 2025 14:40:22 -0700
+Subject: [PATCH] Add AI-based frame interpolation
+
+---
+ libavfilter/vf_vpp_qsv.c | 33 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/libavfilter/vf_vpp_qsv.c b/libavfilter/vf_vpp_qsv.c
+index 0a33c377c83..cb596b03a8f 100644
+--- a/libavfilter/vf_vpp_qsv.c
++++ b/libavfilter/vf_vpp_qsv.c
+@@ -66,6 +66,9 @@ typedef struct VPPContext{
+     /** HDR parameters attached on the input frame */
+     mfxExtMasteringDisplayColourVolume mdcv_conf;
+     mfxExtContentLightLevelInfo clli_conf;
++    /** AI frame interpolation parameters */
++    mfxExtVPPAIFrameInterpolation aiframeinterp_conf;
++    AVRational aiframeinterp;  
+ #endif
+ 
+     /**
+@@ -544,6 +547,26 @@ static int config_output(AVFilterLink *outlink)
+     else
+         outlink->time_base = av_inv_q(vpp->framerate);
+ 
++#if QSV_ONEVPL
++    /*Check if ai-frame-interpolation is enabled and output framerate is valid*/
++    if ((vpp->aiframeinterp.num > 0) && (vpp->aiframeinterp.den > 0)) {
++        int64_t ratio_num = (int64_t)vpp->aiframeinterp.num * inl->frame_rate.den;
++        int64_t ratio_den = (int64_t)vpp->aiframeinterp.den * inl->frame_rate.num;
++        if ((ratio_den != 0) && (ratio_num % ratio_den == 0)) {
++            int ratio = ratio_num / ratio_den;
++            if ((ratio >= 2) && ((ratio & (ratio - 1)) == 0)) {
++                outlink->time_base = av_inv_q(vpp->aiframeinterp);
++                ol->frame_rate      = vpp->aiframeinterp;
++            }
++        } 
++        else {
++            av_log(ctx, AV_LOG_ERROR, "Invalid framerate conversion: Input Frame Rate: %d/%d, Output Frame Rate: %d/%d\n",
++            inl->frame_rate.num, inl->frame_rate.den,
++            vpp->aiframeinterp.num, vpp->aiframeinterp.den);  
++        }
++    }
++#endif
++
+     param.filter_frame  = NULL;
+     param.set_frame_ext_params = vpp_set_frame_ext_params;
+     param.num_ext_buf   = 0;
+@@ -617,6 +640,13 @@ static int config_output(AVFilterLink *outlink)
+         SET_MFX_PARAM_FIELD(procamp_conf, Brightness, vpp->brightness);
+     }
+ 
++    if (vpp->aiframeinterp.num > 0) {
++        INIT_MFX_EXTBUF(aiframeinterp_conf, MFX_EXTBUFF_VPP_AI_FRAME_INTERPOLATION);
++        SET_MFX_PARAM_FIELD(aiframeinterp_conf, FIMode, MFX_AI_FRAME_INTERPOLATION_MODE_DEFAULT);
++        SET_MFX_PARAM_FIELD(aiframeinterp_conf, EnableScd, 1);
++        vpp->transpose = -1;
++    }
++
+     if (vpp->transpose >= 0) {
+         if (QSV_RUNTIME_VERSION_ATLEAST(mfx_version, 1, 17)) {
+             switch (vpp->transpose) {
+@@ -714,7 +744,7 @@ static int config_output(AVFilterLink *outlink)
+         vpp->color_transfer != AVCOL_TRC_UNSPECIFIED ||
+         vpp->color_matrix != AVCOL_SPC_UNSPECIFIED ||
+         vpp->tonemap ||
+-        !vpp->has_passthrough)
++        !vpp->has_passthrough ||  ((vpp->aiframeinterp.num > 0) && (vpp->aiframeinterp.den > 0))) 
+         return ff_qsvvpp_init(ctx, &param);
+     else {
+         /* No MFX session is created in this case */
+@@ -896,6 +926,7 @@ static const AVOption vpp_options[] = {
+     { "compute",   "compute",               0,    AV_OPT_TYPE_CONST,  { .i64 = 3},  INT_MIN, INT_MAX, FLAGS, .unit = "scale mode"},
+     { "vd",        "vd",                    0,    AV_OPT_TYPE_CONST,  { .i64 = 4},  INT_MIN, INT_MAX, FLAGS, .unit = "scale mode"},
+     { "ve",        "ve",                    0,    AV_OPT_TYPE_CONST,  { .i64 = 5},  INT_MIN, INT_MAX, FLAGS, .unit = "scale mode"},
++    { "ai-frame-interpolation",   "AI-based frame interpolation",  OFFSET(aiframeinterp),   AV_OPT_TYPE_RATIONAL, { .dbl = -1.0 },-1.0, DBL_MAX, .flags = FLAGS },
+ #endif
+ 
+     { "rate", "Generate output at frame rate or field rate, available only for deinterlace mode",
+-- 
+2.43.0
+
